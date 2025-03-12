@@ -6,7 +6,7 @@ This project focuses on detecting and predicting stellar flares—sudden bursts 
 
 ## Motivation
 
-Stellar flares play a crucial role in understanding space weather and the habitability of exoplanets. By leveraging machine learning, we aim to:
+Stellar flares play a crucial role in understanding space weather and the habitability of exoplanets. By leveraging machine learning, I aim to:
 
 - Identify **pre-flare signatures** in light curves.
 - Improve **flare detection** by augmenting real observations with synthetic data.
