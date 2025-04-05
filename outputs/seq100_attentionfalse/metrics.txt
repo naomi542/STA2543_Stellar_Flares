@@ -1,0 +1,12 @@
+Classification Report (Test Set):
+              precision    recall  f1-score   support
+
+           0      0.922     0.999     0.959     12812
+           1      0.823     0.090     0.162      1293
+           2      0.925     0.980     0.952      1395
+
+    accuracy                          0.921     15500
+   macro avg      0.890     0.689     0.691     15500
+weighted avg      0.914     0.921     0.892     15500
+
+Test Accuracy: 0.9212

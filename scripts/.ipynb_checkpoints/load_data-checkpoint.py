@@ -106,6 +106,29 @@ def process_tic(tic_id: int, cadence: str = "short", mission: str = "TESS",
             # Find flares using Altaipony's detection
             flcd = flcd.find_flares()
 
+            # Initialize binary and phase labels for each time point
+            time_array = np.array(flcd.time.filled(np.nan).value, dtype=float)
+            flare_binary_labels = np.zeros_like(time_array, dtype=int)
+            flare_phase_labels = np.zeros_like(time_array, dtype=int)
+
+            # Label real detected flares using Altaipony's flare table
+            if flcd.flares is not None and len(flcd.flares) > 0:
+                for _, flare in flcd.flares.iterrows():
+                    t_start = flare["tstart"]
+                    t_peak = flare["tpeak"]
+                    t_stop = flare["tstop"]
+
+                    # Get index ranges for rise and decay
+                    rise_start_idx = np.searchsorted(time_array, t_start)
+                    peak_idx = np.searchsorted(time_array, t_peak)
+                    stop_idx = np.searchsorted(time_array, t_stop)
+
+                    # Label rise phase as 1, decay as 2, binary mask as 1
+                    flare_binary_labels[rise_start_idx:stop_idx] = 1
+                    flare_phase_labels[rise_start_idx:peak_idx] = 1  # Rise
+                    flare_phase_labels[peak_idx:stop_idx] = 2         # Decay
+
+
             # Count significant flares above 90th percentile energy
             if flcd.flares is not None and len(flcd.flares) > 0:
                 threshold = np.percentile(flcd.flares["ed_rec"], 90)
@@ -116,6 +139,9 @@ def process_tic(tic_id: int, cadence: str = "short", mission: str = "TESS",
 
             # Store sector data
             sector_data[flc.sector] = {
+                
+                "flare_binary_labels": flare_binary_labels,
+                "flare_phase_labels": flare_phase_labels,
                 "time": np.array(flcd.time.filled(np.nan).value, dtype=float),
                 "flux": np.array(flcd.flux.filled(np.nan), dtype=float),
                 "detrended_flux": np.array(flcd.detrended_flux.filled(np.nan), dtype=float),

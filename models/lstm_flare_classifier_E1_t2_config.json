@@ -1,0 +1,14 @@
+{
+  "input_size": 1,
+  "hidden_size": 128,
+  "num_layers": 3,
+  "num_classes": 3,
+  "use_attention": true,
+  "batch_size": 64,
+  "epochs": 15,
+  "learning_rate": 0.001,
+  "dropout": 0.2,
+  "seq_len": 100,
+  "stride": 50.0,
+  "model_path": "../models/lstm_flare_classifier_E1_t2.pt"
+}

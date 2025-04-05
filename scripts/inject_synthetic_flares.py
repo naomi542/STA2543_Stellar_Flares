@@ -36,7 +36,7 @@ Each TIC entry will contain updated:
     - "flare_binary_labels": binary mask (1 = flare)
     - "flare_phase_labels": phase labels (1 = rise, 2 = decay)
 
-This tool is designed for generating synthetic training data for time-series flare classification models (e.g. LSTMs, CNNs, HMMs).
+This tool is designed for generating synthetic training data for time-series flare classification models (e.g. LSTMs).
 
 """
 
@@ -44,29 +44,46 @@ This tool is designed for generating synthetic training data for time-series fla
 import numpy as np
 import random
 from copy import deepcopy
+from altaipony.flarelc import FlareLightCurve
 
 # ----------------------------------
 # Flare Shape Templates
 # ----------------------------------
 
 def kepler_rise(t):
-    """Kepler-inspired rise phase of a flare."""
+    """
+    Generate the rise phase of a flare using a Kepler-based polynomial model.
+
+    Parameters:
+        t (np.ndarray): Time array.
+
+    Returns:
+        np.ndarray: Rise phase flux values.
+    """
     return 1 + 1.941 * (t / 0.5) - 0.175 * (t / 0.5)**2 - 2.246 * (t / 0.5)**3
 
 def kepler_decay(t):
-    """Kepler-inspired decay phase of a flare."""
+    """
+    Generate the decay phase of a flare using a Kepler-based exponential model.
+
+    Parameters:
+        t (np.ndarray): Time array.
+
+    Returns:
+        np.ndarray: Decay phase flux values.
+    """
     return 0.689 * np.exp(-1.600 * t) + 0.303 * np.exp(-0.278 * t)
 
 def kepler_flare_template(duration=1.0, time_resolution=0.00139):
     """
-    Generate a normalized flare profile using a Kepler-based template.
-
+    Create a full flare template using Kepler-inspired rise and decay models.
+    
     Parameters:
-        duration (float): Total flare duration in days.
-        time_resolution (float): Time step between flare samples (2 minute cadence = 0.00139 days).
-
+        duration (float): Total duration of the flare in days.
+        time_resolution (float): Cadence between time steps.
+    
     Returns:
-        np.ndarray: A flare shape normalized to a peak of 1.
+        np.ndarray: Normalized flare shape.
     """
     t_rise = np.arange(0, duration * 0.3, time_resolution)
     t_decay = np.arange(time_resolution, duration * 0.7, time_resolution)
@@ -76,6 +93,34 @@ def kepler_flare_template(duration=1.0, time_resolution=0.00139):
     ])
     return flare / np.max(flare)  # Normalize to peak at 1
 
+def generate_scaled_kepler_flare(median_flux, time_resolution=0.00139, amp_scale=0.03):
+    """
+    Generate a realistic flare scaled to the median flux of the star.
+    Args:
+        median_flux (float): Median flux of the star.
+        time_resolution (float): Time step in days. Default is ~2 minutes.
+        amp_scale (float): Peak flare amplitude as fraction of median flux.
+    Returns:
+        flare (np.ndarray): Flare shape to inject.
+        rise_len (int): Number of samples in rise.
+        decay_len (int): Number of samples in decay.
+    """
+    # Realistic duration: 20–60 min total, 2-min cadence = 10–30 points
+    total_minutes = np.random.randint(20, 60)
+    total_duration_days = total_minutes / (24 * 60)
+    
+    flare_shape = kepler_flare_template(duration=total_duration_days, time_resolution=time_resolution)
+    
+    # Scale flare peak to a percentage of the median flux
+    scaled_flare = flare_shape * (amp_scale * median_flux)
+    
+    # Split rise and decay lengths
+    total_points = len(flare_shape)
+    rise_len = int(total_points * 0.3)
+    decay_len = total_points - rise_len
+    
+    return scaled_flare, rise_len, decay_len
+    
 # ----------------------------------
 # Utilities for Data Gaps
 # ----------------------------------
@@ -121,6 +166,7 @@ def interpolate_gap_time(time_start, time_end, num_points):
         np.ndarray: Interpolated time values.
     """
     return np.linspace(time_start, time_end, num_points + 2)[1:-1]  # Exclude endpoints
+
 
 # ----------------------------------
 # Flare Injection into a Single Light Curve
@@ -191,11 +237,37 @@ def inject_into_lightcurve(time, flux, num_flares=1, inject_in_gaps=True):
         if flare_idx is None:
             continue  # couldn't find non-overlapping spot
 
-        flare_amp = 0.01 * np.nanmedian(flux)
-        flare_scaled = flare * flare_amp + np.random.normal(0, 0.0001 * flare_amp, size=flare_len)
+        # Generate realistic flare
+        flare, rise_len, decay_len = generate_scaled_kepler_flare(median_flux=np.nanmedian(flux))
+
+        flare_len = len(flare)
+
+        # Find a non-overlapping spot
+        attempts = 0
+        flare_idx = None
+        while attempts < 100:
+            idx = random.randint(0, len(synthetic_time) - flare_len - 1)
+            if all((idx + i) not in used_indices for i in range(flare_len)):
+                flare_idx = idx
+                break
+            attempts += 1
+
+        if flare_idx is None:
+            continue  # couldn't find non-overlapping spot
 
         for i in range(flare_len):
-            synthetic_flux[flare_idx + i] += flare_scaled[i]
+            synthetic_flux[flare_idx + i] += flare[i]
+            binary_labels[flare_idx + i] = 1
+            if i < rise_len:
+                phase_labels[flare_idx + i] = 1  # Rise
+            else:
+                phase_labels[flare_idx + i] = 2  # Decay
+            used_indices.add(flare_idx + i)
+        #flare_scaled = flare * flare_amp + np.random.normal(0, 0.0001 * flare_amp, size=flare_len)
+
+        for i in range(flare_len):
+            #synthetic_flux[flare_idx + i] += flare_scaled[i]
+            synthetic_flux[flare_idx + i] += flare[i] + np.random.normal(0, 0.001 * flare[i]) # already scaled
             binary_labels[flare_idx + i] = 1
             phase_labels[flare_idx + i] = 1 if i < flare_len // 2 else 2
             used_indices.add(flare_idx + i)  # track used index
@@ -248,7 +320,33 @@ def inject_into_lightcurves(processed_lightcurves: dict,
 
         data["time"] = syn_time
         data["synthetic_flux"] = syn_flux
+        
+        # Merge with pre-existing real flare labels, if available
+        
+        # Re-run flare detection on the synthetic light curve
+        
+        flcd = FlareLightCurve(time=syn_time, flux=syn_flux)
+        flcd.detrended_flux = flcd.flux.copy() 
+        sigma = np.ones_like(flcd.flux) * 1.5
+        flcd = flcd.find_flares(sigma=sigma, minsep=5)
+
+        if flcd.flares is not None and len(flcd.flares) > 0:
+            for _, flare in flcd.flares.iterrows():
+                t_start, t_peak, t_stop = flare["tstart"], flare["tpeak"], flare["tstop"]
+                i_start = np.searchsorted(syn_time, t_start)
+                i_peak = np.searchsorted(syn_time, t_peak)
+                i_stop = np.searchsorted(syn_time, t_stop)
+
+                for i in range(i_start, i_stop):
+                    if bin_lbls[i] == 0:
+                        bin_lbls[i] = 1
+                        if i < i_peak:
+                            phase_lbls[i] = 1  # rise
+                        else:
+                            phase_lbls[i] = 2  # decay
         data["flare_binary_labels"] = bin_lbls
         data["flare_phase_labels"] = phase_lbls
 
     return synthetic_lightcurves
+
+

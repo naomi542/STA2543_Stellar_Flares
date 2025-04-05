@@ -1,20 +1,26 @@
 """
 lstm_flare_classifier.py
 
-Train or load an LSTM model with attention to classify each timestep in a light curve
-as one of three flare phases: 0 (no flare), 1 (rise), 2 (decay).
+This module provides functionality for training, evaluating, and using an LSTM-based neural network
+(with optional attention mechanism) to classify each timestep in a light curve as one of three 
+flare phases: 0 (no flare), 1 (rise), 2 (decay). It includes:
 
-Data should come from flare-injected synthetic light curves with:
-- time
-- synthetic_flux
-- flare_phase_labels
+- A PyTorch Dataset for preprocessed flare light curves
+- LSTM classifier model with optional attention and dropout
+- Focal loss function for handling class imbalance
+- Utilities to compute dynamic class weights
+- Training loop with early stopping and model checkpointing
+- Model saving/loading
+- Evaluation with confusion matrix and classification report
 
-Usage:
-    from lstm_flare_classifier import train_model, load_model, evaluate_model, predict_single_sequence
-    model = train_model(dataset_path='..data/synthetic_lightcurves.pkl')
-    model = load_model()
-    evaluate_model(model, dataset_path='..data/synthetic_lightcurves.pkl')
-    prediction = predict_single_sequence(model, flux_sequence)
+Expected input is a dictionary of synthetic light curves injected with flares,
+containing keys: 'time', 'synthetic_flux', and 'flare_phase_labels'.
+
+Example usage:
+    from lstm_flare_classifier import train_model, evaluate_model, load_model
+    model = train_model(dataset_path='data/synthetic_lightcurves.pkl')
+    evaluate_model(model)
+    loaded_model = load_model()
 """
 
 import os
@@ -50,23 +56,25 @@ class FlarePhaseDataset(Dataset):
     """
     PyTorch Dataset for flare phase classification from synthetic TESS light curves.
 
-    This dataset:
-    - Applies Savitzky-Golay smoothing to each light curve to isolate the flare-only signal
-    - Segments each light curve into overlapping sequences
-    - Optionally filters out sequences that contain no flare activity
-    - Maintains original flare phase labels: 0 = no flare, 1 = rise, 2 = decay
+    Each sample is a sequence of flare-only flux (smoothed baseline subtracted), 
+    along with the corresponding phase labels.
+
+    - Applies Savitzky-Golay smoothing to remove the stellar baseline.
+    - Extracts overlapping sequences from each TIC light curve.
+    - Includes a balance of flaring (rise+decay) and optionally non-flaring segments.
 
     Args:
-        lightcurve_dict (dict): Dictionary of TIC IDs and their flare-injected light curve data.
-        seq_len (int): Length of each input sequence.
-        tic_ids (list): List of TIC IDs to include in the dataset.
-        stride (int): Step size between overlapping sequences (default: STRIDE).
+    lightcurve_dict (dict): Dictionary mapping TIC IDs to flare-injected light curve data.
+    tic_ids (list): List of TIC IDs to include.
+    seq_len (int): Number of timesteps in each extracted sequence.
+    stride (int): Step size for windowed sequence extraction.
+    include_nonflare_ratio (float): Ratio of non-flaring sequences to inject to improve class balance.
     Returns:
         torch.utils.data.Dataset: Each item is a tuple of:
             - flare-only flux sequence (shape: [seq_len, 1])
             - phase label sequence (shape: [seq_len])
     """
-    def __init__(self, lightcurve_dict, seq_len, tic_ids, stride=STRIDE, include_nonflare_ratio=0.05):
+    def __init__(self, lightcurve_dict, tic_ids, seq_len= SEQ_LEN, stride=STRIDE, include_nonflare_ratio=0.05):
         self.samples = []
         nonflare_candidates= []
         for tic in tic_ids:
@@ -86,7 +94,8 @@ class FlarePhaseDataset(Dataset):
                 label_seq = labels[i:i+seq_len]
                 flux_seq = flare_flux[i:i+seq_len]
                 label_counts = Counter(label_seq)
-                # insist that we have some non-flaring sequences and some sequences where both rise and decay are present in the sequence so the model is able to learn and avoid class imbalance
+                # insist that we have some non-flaring sequences and some sequences where both rise 
+                #and decay are present in the sequence so the model is able to learn and avoid class imbalance
                 if 1 in label_seq and 2 in label_seq:
                     self.samples.append((flux_seq, label_seq))
                 elif label_counts[0] > (label_counts[1] + label_counts[2]):
@@ -100,14 +109,15 @@ class FlarePhaseDataset(Dataset):
                                               min(desired_nonflare, 
                                               len(nonflare_candidates)))
             self.samples.extend(selected_nonflare)
-        random.shuffle(self.samples) # randomly reorder list in place so DataLoader is not grabbing sequences grouped in a bias way
+        # randomly reorder list in place so DataLoader is not grabbing sequences grouped in a bias way
+        random.shuffle(self.samples) 
 
         # Count total points per class (flattened across all sequences)
         all_labels = []
         for _, label_seq in self.samples:
             all_labels.extend(label_seq)
         label_counts = Counter(all_labels)
-        print("Total label counts:", label_counts)
+        print("Total label counts (FULL DATASET)::", label_counts)
 
 
     def __len__(self):
@@ -124,14 +134,15 @@ class FlarePhaseDataset(Dataset):
 # ----------------------------
 class LSTMFlareClassifier(nn.Module):
     """
-    LSTM-based model with attention mechanism to classify each timestep
-    in a light curve sequence into one of the flare phases.
-
-    Parameters:
-        input_size (int): Size of the input feature vector (default: 1).
-        hidden_size (int): Number of LSTM hidden units.
-        num_layers (int): Number of LSTM layers.
-        num_classes (int): Number of flare phase classes (default: 3).
+    LSTM-based classifier for flare phase prediction at each timestep in a sequence.
+    
+    Args:
+        input_size (int): Number of input features (default: 1 for 1D flux).
+        hidden_size (int): Number of hidden units in each LSTM layer.
+        num_layers (int): Number of stacked LSTM layers.
+        num_classes (int): Number of output classes (default: 3).
+        dropout (float): Dropout probability between LSTM and final layer.
+        use_attention (bool): If True, applies attention weighting to LSTM outputs.
     """
     def __init__(self, input_size=1, hidden_size=128, num_layers=3, num_classes=3, dropout=0.3, use_attention=True):
         super().__init__()
@@ -154,8 +165,12 @@ class LSTMFlareClassifier(nn.Module):
 class FocalLoss(nn.Module):
     def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
         """
-        alpha: weighting factor for classes (tensor of shape [num_classes])
-        gamma: focusing parameter for modulating factor (1-p)
+        Focal loss for addressing class imbalance by focusing learning on hard-to-classify examples.
+        
+        Args:
+            alpha (tensor): Optional class weights.
+            gamma (float): Focusing parameter. Higher values increase emphasis on difficult examples.
+            reduction (str): Aggregation method ('mean', 'sum', or 'none') for batch loss.
         """
         super(FocalLoss, self).__init__()
         self.alpha = alpha
@@ -183,7 +198,15 @@ class FocalLoss(nn.Module):
 
 # Compute class weights dynamically
 def compute_class_weights(dataset):
-    """Compute class weights from a dataset of (seq, label_seq) samples"""
+    """
+    Computes inverse-frequency class weights from a labeled dataset.
+    
+    Args:
+        dataset (Dataset): Instance of FlarePhaseDataset or equivalent.
+    
+    Returns:
+        torch.Tensor: Weight for each class (shape: [num_classes]).
+    """
     from collections import Counter
     label_counts = Counter()
     for _, label_seq in dataset:
@@ -195,15 +218,32 @@ def compute_class_weights(dataset):
     print(f"Computed class weights: {weights}")
     return weights
 
-def train_model(dataset_path=SYNTHETIC_PATH, batch_size=BATCH_SIZE, epochs=EPOCHS, learning_rate=LR, seq_len=SEQ_LEN, use_attention= True, input_size=1, hidden_size= 128, num_layers=3, num_classes=3, dropout=0.3, split_path= SPLIT_PATH, model_path= SAVE_PATH):
+def train_model(dataset_path=SYNTHETIC_PATH, batch_size=BATCH_SIZE, epochs=EPOCHS, learning_rate=LR, seq_len=SEQ_LEN, use_attention= True, input_size=1, hidden_size= 128, num_layers=3, num_classes=3, dropout=0.3, stride= STRIDE, split_path= SPLIT_PATH, model_path= SAVE_PATH):
     """
-    Trains the LSTM model on synthetic flare phase data using star-based splitting.
-
-    Parameters:
-        dataset_path (str): Path to the pickled dictionary of processed synthetic light curves.
-
+    Train an LSTM flare classifier on the flare-injected dataset using star-based train/val/test splits.
+    
+    - Uses dynamic class weights.
+    - Supports optional attention in the model.
+    - Includes early stopping based on validation loss.
+    - Saves model and config to disk.
+    
+    Args:
+        dataset_path (str): Path to pickled synthetic lightcurve dictionary.
+        model_path (str): Where to save the model.
+        split_path (str): Where to save the train/val/test split.
+        batch_size (int): Number of samples per batch.
+        epochs (int): Total number of training epochs.
+        learning_rate (float): Optimizer learning rate.
+        seq_len (int): Length of input sequences.
+        use_attention (bool): Whether to apply attention in the model.
+        input_size (int): Feature size of each timestep.
+        hidden_size (int): Hidden dimension of LSTM.
+        num_layers (int): Number of LSTM layers.
+        dropout (float): Dropout rate.
+        num_classes (int): Number of phase classes.
+    
     Returns:
-        model (nn.Module): Trained LSTMFlareClassifier model.
+        nn.Module: Trained model.
     """
     with open(dataset_path, 'rb') as f:
         data = pickle.load(f)
@@ -218,9 +258,9 @@ def train_model(dataset_path=SYNTHETIC_PATH, batch_size=BATCH_SIZE, epochs=EPOCH
     with open(split_path, 'w') as f:
         json.dump(splits, f)
 
-    train_ds = FlarePhaseDataset(data, seq_len, tic_ids=train_tics)
-    val_ds = FlarePhaseDataset(data, seq_len, tic_ids=val_tics)
-    test_ds = FlarePhaseDataset(data, seq_len, tic_ids=test_tics)
+    train_ds = FlarePhaseDataset(data, tic_ids=train_tics, seq_len= seq_len, stride=stride)
+    val_ds = FlarePhaseDataset(data, tic_ids=val_tics, seq_len= seq_len, stride= stride)
+    test_ds = FlarePhaseDataset(data, tic_ids=test_tics, seq_len= seq_len, stride= stride)
 
     train_loader = DataLoader(train_ds, batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size)
@@ -297,6 +337,7 @@ def train_model(dataset_path=SYNTHETIC_PATH, batch_size=BATCH_SIZE, epochs=EPOCH
             "learning_rate": learning_rate,
             "dropout": dropout,
             "seq_len": seq_len,
+            "stride": stride,
             "model_path": model_path}
             
             config_path = model_path.replace(".pt", "_config.json")
@@ -324,13 +365,13 @@ def train_model(dataset_path=SYNTHETIC_PATH, batch_size=BATCH_SIZE, epochs=EPOCH
 # ----------------------------
 def load_model(model_path=SAVE_PATH):
     """
-    Loads a trained LSTM flare classifier model from disk.
-
-    Parameters:
-        model_path (str): Path to the saved model file.
-
+    Loads a trained LSTM model from disk using its saved configuration.
+    
+    Args:
+        model_path (str): Path to .pt model file.
+    
     Returns:
-        model (nn.Module): Loaded model in evaluation mode.
+        nn.Module: The loaded model in eval mode.
     """
     config_path = model_path.replace(".pt", "_config.json")
     with open(config_path, "r") as f:
@@ -354,17 +395,25 @@ def load_model(model_path=SAVE_PATH):
 # ----------------------------
 # Evaluate Model
 # ----------------------------
-def evaluate_model(model,model_path= None,batch_size=BATCH_SIZE, seq_len=SEQ_LEN, dataset_path=SYNTHETIC_PATH, split_path= SPLIT_PATH, visualize=True, save_report=True, output_dir="../outputs"):
+def evaluate_model(model,model_path= None,batch_size=BATCH_SIZE, seq_len=SEQ_LEN, stride= STRIDE, dataset_path=SYNTHETIC_PATH, split_path= SPLIT_PATH, visualize=True, save_report=True, output_dir="../outputs"):
     """
-    Evaluates the model on the test dataset, prints classification metrics,
-    optionally displays a confusion matrix, and saves evaluation results.
-
-    Parameters:
-        model (nn.Module): Trained model to evaluate.
-        dataset_path (str): Path to the dataset pickle file.
-        visualize (bool): Whether to display confusion matrix plot.
-        save_report (bool): Whether to save accuracy and classification report to disk.
-        output_dir (str): Folder path to save evaluation output files.
+    Evaluate a trained flare classifier on the test set using the saved split file.
+    
+    - Prints classification report.
+    - Outputs confusion matrix.
+    - Saves evaluation metrics to disk.
+    
+    Args:
+        model (nn.Module): A trained model (optional if loading from disk).
+        model_path (str): Path to model checkpoint to load (optional if model is provided).
+        batch_size (int): Evaluation batch size.
+        seq_len (int): Sequence length used for slicing.
+        stride (int): Stride for generating sequences.
+        dataset_path (str): Path to synthetic lightcurve data.
+        split_path (str): JSON file specifying train/val/test splits.
+        visualize (bool): Whether to display confusion matrix.
+        save_report (bool): Whether to save metrics to disk.
+        output_dir (str): Where to store results.
     """
     import matplotlib.pyplot as plt
     from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay, classification_report
@@ -374,7 +423,7 @@ def evaluate_model(model,model_path= None,batch_size=BATCH_SIZE, seq_len=SEQ_LEN
     with open(split_path, 'r') as f:
         splits = json.load(f)
 
-    test_ds = FlarePhaseDataset(data, seq_len, tic_ids=splits["test"])
+    test_ds = FlarePhaseDataset(data, tic_ids=splits["test"], seq_len= seq_len, stride= stride)
     test_loader = DataLoader(test_ds, batch_size)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -382,13 +431,19 @@ def evaluate_model(model,model_path= None,batch_size=BATCH_SIZE, seq_len=SEQ_LEN
         model = load_model(model_path=model_path)
     
     model.to(device)
+    model.eval() # ensures eval model for both in memory and pre loaded models
 
     all_preds, all_labels = [], []
     with torch.no_grad():
-        for x, y in test_loader:
+        for i, (x, y) in enumerate(test_loader):
             x, y = x.to(device), y.to(device)
             output = model(x)
             preds = output.argmax(dim=-1)
+            # print firsts equence only for sanity check
+            if i==0:
+                print("First batch sanity check")
+                print("Preds:", preds[0].cpu().numpy())
+                print("True: ", y[0].cpu().numpy())
             all_preds.extend(preds.cpu().numpy().reshape(-1))
             all_labels.extend(y.cpu().numpy().reshape(-1))
 
@@ -412,6 +467,7 @@ def evaluate_model(model,model_path= None,batch_size=BATCH_SIZE, seq_len=SEQ_LEN
 
     if visualize:
         cm = confusion_matrix(all_labels, all_preds)
+        print(cm)
         disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["None", "Rise", "Decay"])
         disp.plot(cmap="Blues")
         plt.title("Flare Phase Confusion Matrix")
@@ -423,26 +479,3 @@ def evaluate_model(model,model_path= None,batch_size=BATCH_SIZE, seq_len=SEQ_LEN
         print(f"Saved confusion matrix to {cm_path}")
         plt.show()
 
-
-# ----------------------------
-# Predict Single Sequence
-# ----------------------------
-def predict_single_sequence(model, flux_sequence):
-    """
-    Makes predictions on a single sequence of flux values.
-
-    Parameters:
-        model (nn.Module): Trained model.
-        flux_sequence (np.ndarray): 1D numpy array of flux values.
-
-    Returns:
-        np.ndarray: Predicted phase labels for each timestep.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
-    with torch.no_grad():
-        seq_tensor = torch.tensor(flux_sequence, dtype=torch.float32).unsqueeze(0).unsqueeze(-1).to(device)
-        output = model(seq_tensor)
-        pred_labels = output.argmax(dim=-1).squeeze(0).cpu().numpy()
-    return pred_labels

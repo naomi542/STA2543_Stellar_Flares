@@ -1,17 +1,22 @@
 """
 plot_utils.py
 
-Generates and saves light curve plots for all processed TICs.
-Includes tools for both raw and synthetic light curves.
+Utilities for plotting raw and synthetic light curves for TESS stars.
+
+Functions:
+- plot_raw_lightcurves(...): Save plots of raw and detrended flux.
+- plot_synthetic_lightcurves(...): Save plots of synthetic flux with injected flares.
+- inspect_synthetic_lightcurve(...): Visualize flare phases and smoothed baselines for a specific TIC.
 
 Usage:
-    from plot_utils import plot_raw_lightcurves, plot_synthetic_lightcurves
+    from plot_utils import plot_raw_lightcurves, plot_synthetic_lightcurves, inspect_synthetic_lightcurve
 """
 
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.time import Time
+from scipy.signal import savgol_filter
 
 
 def plot_raw_lightcurves(processed_lightcurves: dict, output_dir: str = "../data/figures/raw"):
@@ -52,12 +57,22 @@ def plot_raw_lightcurves(processed_lightcurves: dict, output_dir: str = "../data
             plt.plot(time_array, flux_array / np.nanmedian(flux_array) + 0.1, "r", label="PDCSAP_FLUX")
             plt.plot(time_array, detrended_flux_array / np.nanmedian(detrended_flux_array), "b", label="Detrended Flux")
 
+            # Dynamically set y-limits based on flux range
+            ymin = np.nanmin([flux_array.min(), detrended_flux_array.min()]) / np.nanmedian(detrended_flux_array)
+            ymax = np.nanmax([flux_array.max(), detrended_flux_array.max()]) / np.nanmedian(detrended_flux_array)
+
+
             # Labels and Titles
             plt.xlabel("Time - 2457000 [BKJD days]")
             plt.ylabel(r"Flux [e$^-$s$^{-1}$]")
             plt.title(f"TIC {tic_id} - Light Curve (Sector {sector})")
             plt.legend(loc=2, fontsize=13)
             plt.xlim(time_array[0], time_array[-1])
+            # Pad by 5% for nice margins
+            yrange = ymax - ymin
+            if yrange < 0.05:
+                plt.ylim(0.95, 1.05)
+            plt.ylim(ymin - 0.05 * yrange, ymax + 0.05 * yrange)
             plt.ylim(0.95, 1.30)
 
             # Save Figure
@@ -115,3 +130,51 @@ def plot_synthetic_lightcurves(synthetic_lightcurves: dict, output_dir: str = ".
         except Exception as e:
             print(f"Failed to plot synthetic light curve for TIC {tic_id}: {e}")
 
+
+def inspect_synthetic_lightcurve(tic_id, synthetic_lightcurves, show_baseline=True, show_overlay=True):
+    """
+    Plots a synthetic light curve for a given TIC ID.
+    
+    Parameters:
+        tic_id (str or int): The TIC ID to visualize.
+        synthetic_lightcurves (dict): Dictionary of light curves loaded from your synthetic dataset.
+        show_baseline (bool): Whether to plot the smoothed baseline alongside the original flux.
+        show_overlay (bool): Whether to overlay flare phase labels (1 = rise, 2 = decay).
+    """
+    example = synthetic_lightcurves[tic_id]
+    time = example["time"]
+    flux = example["synthetic_flux"]
+    phase_labels = example["flare_phase_labels"]
+
+    # Plot original + baseline
+    if show_baseline:
+        baseline = savgol_filter(flux, window_length=101, polyorder=3)
+
+        plt.figure(figsize=(12, 4))
+        plt.plot(time, flux, color='black', linewidth=0.7, label='Synthetic Flux')
+        plt.plot(time, baseline, color='red', linewidth=1.2, label='Smoothed Baseline')
+        plt.title(f"TIC {tic_id} — Original vs Smoothed")
+        plt.xlabel("Time [days]")
+        plt.ylabel("Flux")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+    # Overlay phase labels
+    if show_overlay:
+        rise_times = time[np.array(phase_labels) == 1]
+        rise_flux = flux[np.array(phase_labels) == 1]
+
+        decay_times = time[np.array(phase_labels) == 2]
+        decay_flux = flux[np.array(phase_labels) == 2]
+
+        plt.figure(figsize=(12, 4))
+        plt.plot(time, flux, 'k', label="Flux")
+        plt.plot(rise_times, rise_flux, 'orange', linestyle='None', marker='o', markersize=3, label="Rise")
+        plt.plot(decay_times, decay_flux, 'blue', linestyle='None', marker='o', markersize=3, label="Decay")
+        plt.legend()
+        plt.title(f"TIC {tic_id} — Flare Phase Overlay")
+        plt.xlabel("Time [days]")
+        plt.ylabel("Flux")
+        plt.tight_layout()
+        plt.show()
