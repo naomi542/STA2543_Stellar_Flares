@@ -1,0 +1,39 @@
+# OS junk
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# VSCode and editor folders
+.vscode/
+*.code-workspace
+
+# Anaconda and virtual envs
+.venv/
+env/
+venv/
+.virtual_documents/
+anaconda_projects/
+
+# Build / Distribution folders
+build/
+dist/
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Notebook metadata
+*.nbconvert.ipynb
+
+# Don't ignore important folders
+!data/
+!models/
+!outputs/
+!scripts/
