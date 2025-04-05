@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This project performs **flare phase classification** (None, Rise, Decay) on synthetic stellar light curves. It uses an LSTM-based neural network with optional attention to predict the phase of each timestep in a flux sequence. All steps are orchestrated from a single pipeline notebook: `pipeline.ipynb`. We analyze time-series light curve data from TESS (Transiting Exoplanet Survey Satellite) and generate synthetic flare data to expand the dataset.
+This project performs **flare phase classification** (None, Rise, Decay) on synthetic stellar light curves. It uses an LSTM-based neural network with optional attention to predict the phase of each timestep in a flux sequence. All steps are orchestrated from a single pipeline notebook: `pipeline.ipynb`. I analyze time-series light curve data from TESS (Transiting Exoplanet Survey Satellite) and generate synthetic flare data to expand the dataset.
 ---
 
 ## Motivation
@@ -11,7 +11,7 @@ Stellar flares play a crucial role in understanding space weather and the habita
 
 - Identify **pre-flare signatures** in light curves.
 - Improve **flare detection** by augmenting real observations with synthetic data.
-- Develop an **LSTM-based model** to predict flares before they happen. This is the long-term goal. With this project, we aim to prove that a predictive model is able to distinguish the different phases of a stellar profile. With more advanced modelling and larger dataset, we should be able to predict flares as the lightcurve is fed into an LSTM network in sequences.
+- Develop an **LSTM-based model** to predict flares before they happen. This is the long-term goal. With this project, I aim to prove that a predictive model is able to distinguish the different phases of a stellar profile. With more advanced modelling and larger dataset, we should be able to predict flares as the lightcurve is fed into an LSTM network in sequences.
 ---
 
 
